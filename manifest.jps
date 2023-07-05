@@ -79,7 +79,6 @@ settings:
         - type: displayfield
           value: sec interval
 
-
     - caption: Run Additional Script
       name: useAdditionalWaitCondition
       type: toggle
@@ -164,27 +163,27 @@ onInstall:
 
           - switch (response.status):
               0:
-                if (!${settings.startDespiteFailure:true}):
+                if (!${settings.startDespiteFailure}):
                   stopEvent:
                     type: warning
                     message: The associated environment, ${settings.dependsOnEnvName}, does not exist
               1:
-                if (${settings.useAdditionalWaitCondition:false}):
+                if (${settings.useAdditionalWaitCondition}):
                   - waitOnCustomCondition:
                       waitCondition: |-
                         ${settings.waitCmd}
                       targetEnvName: ${settings.dependsOnEnvName}
                       variables:
                         DEPENDS_ON_DOMAIN: ${globals.DEPENDS_ON_DOMAIN}
-                  - if (${response.exitStatus:1} != 0):
-                      if (!${settings.startDespiteFailure:true}):
+                  - if ('${response.exitStatus}' != '0'):
+                      if (!${settings.startDespiteFailure}):
                         stopEvent:
                           type: warning
                           message: The associated environment, ${settings.dependsOnEnvName}, is currently unresponsive
                   - else:
                       log: The associated environment, ${settings.dependsOnEnvName}, is operational
               default:
-                if (!${settings.startDespiteFailure:true}):
+                if (!${settings.startDespiteFailure}):
                   stopEvent:
                     type: warning
                     message: The associated environment, ${settings.dependsOnEnvName}, is not running
