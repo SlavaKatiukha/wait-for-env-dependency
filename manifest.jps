@@ -1,0 +1,228 @@
+type: install
+name: Wait For Dependency Before Starting Environment
+jpsVersion: 7.3.1
+
+description: |
+  This add-on will pause when trying to start the target environment if the associated environment is not started or is not operational.
+  If you need to confirm that the associated environment not only started but is fully operational also, select "Run Additional Script" and implement your custom wait condition.
+  This wait condition will run as a shell script on the first node of the associated environment, either if it is already running or as soon as it enters the running state.\
+  You can install the add-on several times if you need to enable the dependency between more than one environment
+
+settings:
+  fields:
+    - type: compositefield
+      hideCaption: true
+      align: middle
+      defaultMargins: 0 10 0 0
+      items:
+      - type: displayfield
+        value: Environment
+
+      - name: targetEnvName
+        type: envlist
+        editable: true
+        required: true
+        valueField: shortdomain
+        flex: 1
+
+      - type: displayfield
+        cls: x-form-item-label
+        value: depends on
+
+      - name: dependsOnEnvName
+        type: envlist
+        editable: true
+        required: true
+        margins: 0 0 0 0
+        valueField: shortdomain
+        disableInactive: false
+        flex: 1
+
+    - type: separator
+
+    - type: list
+      name: nodeGroup
+      caption: Attach Add-On To
+      width: 230
+      required: true
+      tooltip: |
+        The add-on will be attached to the selected node group of the target environment.
+        To remove the dependency between environments, simply remove the add-on using the "Add-ons" panel or through the "Uninstall" API
+      dependsOn:
+        envName: {}
+
+    - type: compositefield
+      align: middle
+      defaultMargins: 0 10 0 0
+      caption: Max Attempts
+      tooltip: |
+        The add-on will check the environment status based on the selected maximum attempts and interval settings.
+        Please note that these settings are not taken into account while running the additional script
+      items:
+        - type: spinner
+          name: maxRetries
+          width: 70
+          min: 1
+          max: 360
+          default: 100
+
+        - type: displayfield
+          value: with a
+
+        - type: spinner
+          name: retryInterval
+          width: 60
+          min: 1
+          max: 5
+          default: 3
+
+        - type: displayfield
+          value: sec interval
+
+
+    - caption: Run Additional Script
+      name: useAdditionalWaitCondition
+      type: toggle
+      default: false
+      tooltip: |
+        Activates an additional wait condition.
+        A shell script will run on the first node of the associated environment, either if it is already running or as soon as it enters the running state.
+        The placeholder ${DEPENDS_ON_DOMAIN} can be used to refer to the domain of the associated environment.
+        The default value sets a 5-minute timeout to check that the associated environment responds from the external endpoint with an HTTP status code of 200
+
+      showIf:
+        true:
+        - type: text
+          name: waitCmd
+          hideCaption: true
+          height: 160
+          required: true
+          default: |
+            timeout 300 bash -c 'envip=$(dig +short "${DEPENDS_ON_DOMAIN}" @8.8.8.8 | tail -n1); while [[ "$(curl -I ''http://${DEPENDS_ON_DOMAIN}/'' --resolve ${DEPENDS_ON_DOMAIN}:80:$envip -s -o /dev/null -w ''%{http_code}'')" != "200" ]]; do sleep 3; done' || false
+
+    - caption: Start Despite Failure
+      name: startDespiteFailure
+      type: toggle
+      default: true
+      tooltip: |
+        Start the target environment even if all wait conditions have failed and the associated environment is non-operational.
+        Please note that disabling this option may result in the inability to run the target environment. In such cases, use the "Uninstall" API to remove the add-on
+
+onBeforeInit: |
+  let resp = api.env.control.GetBasicEnvsInfo();
+  if (resp.result !== 0) return resp;
+  let envInfos = resp.infos, envs = [], nodes = {};
+
+  for (let envInfo of envInfos) {
+      let env = envInfo.env;
+
+      if (env.status == 1)
+          for (let node of envInfo.nodes) {
+            nodes[env.envName] = nodes[env.envName] || [];
+            nodes[env.envName].groups = nodes[env.envName].groups || {};
+
+            if (!nodes[env.envName].groups[node.nodeGroup])
+              nodes[env.envName].push({
+                value: node.nodeGroup,
+                caption: (node.displayName || node.name) + ' (' + node.nodeGroup + ')'
+              });
+
+            nodes[env.envName].groups[node.nodeGroup] = true;
+          }
+  }
+
+  jps.settings.fields[2].dependsOn.targetEnvName = nodes;
+  return { result: 0, settings: jps.settings };
+
+onInstall:
+  - if ('${settings.targetEnvName}' == '${settings.dependsOnEnvName}'):
+      return:
+        type: warning
+        message: The environment '${settings.targetEnvName}' cannot depend on itself
+
+  - env.control.GetEnvInfo:
+      envName: ${settings.dependsOnEnvName}
+      lazy: true
+
+  - setGlobals:
+      DEPENDS_ON_DOMAIN: ${response.env.domain}
+
+  - install:
+      envName: ${settings.targetEnvName}
+      nodeGroup: ${settings.nodeGroup}
+      jps:
+        type: update
+        name: Wait Before Start
+        description: Wait For '${settings.dependsOnEnvName}'
+
+        onBeforeStart:
+          - waitForEnvRunningStatus:
+              envName: ${settings.dependsOnEnvName}
+              logPrefix: ${settings.targetEnvName}
+              maxRetries: ${settings.maxRetries}
+              interval: ${settings.retryInterval}
+
+          - switch (response.status):
+              0:
+                if (!${settings.startDespiteFailure:true}):
+                  stopEvent:
+                    type: warning
+                    message: The associated environment, ${settings.dependsOnEnvName}, does not exist
+              1:
+                if (${settings.useAdditionalWaitCondition:false}):
+                  - waitOnCustomCondition:
+                      waitCondition: |-
+                        ${settings.waitCmd}
+                      targetEnvName: ${settings.dependsOnEnvName}
+                      variables:
+                        DEPENDS_ON_DOMAIN: ${globals.DEPENDS_ON_DOMAIN}
+                  - if (${response.exitStatus:1} != 0):
+                      if (!${settings.startDespiteFailure:true}):
+                        stopEvent:
+                          type: warning
+                          message: The associated environment, ${settings.dependsOnEnvName}, is currently unresponsive
+                  - else:
+                      log: The associated environment, ${settings.dependsOnEnvName}, is operational
+              default:
+                if (!${settings.startDespiteFailure:true}):
+                  stopEvent:
+                    type: warning
+                    message: The associated environment, ${settings.dependsOnEnvName}, is not running
+
+        actions:
+          waitForEnvRunningStatus:
+            - envName: ${this.envName}
+              maxRetries: ${this.maxRetries}
+              interval: ${this.interval} # seconds
+              logPrefix: ${this.logPrefix}
+              script: |
+                import com.hivext.api.Response;
+                let retries = 0, waitInterval = (interval * 1000), resp
+
+                do {
+                  java.lang.Thread.sleep(retries ? waitInterval : 0)
+
+                  resp = api.env.control.GetEnvInfo({ envName: envName, lazy: true })
+                  if (resp.result != 0 && resp.result != Response.APPLICATION_NOT_EXIST) return resp;
+                  api.marketplace.console.WriteLog(logPrefix + " [" + (retries + 1) + "/"+ maxRetries + "] checking " + envName + " status result: " + (resp.env ? resp.env.status : resp ));
+
+                } while (resp.result != Response.APPLICATION_NOT_EXIST && resp.env.status != 1 && (++retries < maxRetries))
+
+                return { result: 0, status: (resp.env || {}).status || 0, retries: retries }
+
+          waitOnCustomCondition:
+            - env.control.GetEnvInfo:
+                envName: ${this.targetEnvName}
+
+            - set:
+                nodeId: ${response.nodes[0].id}
+
+            - waitCondition: ${this.waitCondition}
+              variables: ${this.variables}
+              script: |
+                import org.apache.commons.lang3.text.StrSubstitutor
+                waitCondition = new StrSubstitutor(JSON.parse(variables || '{}'), "${", "}").replace(waitCondition).trim()
+                api.marketplace.console.WriteLog(waitCondition)
+                let resp = api.env.control.ExecCmdById({ envName: '${this.targetEnvName}', nodeId: '${this.nodeId}', commandList: [{ command: waitCondition }] })
+
+                return { result: 0, exitStatus: (resp.responses || [{}])[0].exitStatus, data: resp }
